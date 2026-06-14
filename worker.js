@@ -141,11 +141,11 @@ function detectJenisPanen(jadwal, jadwalOrder) {
   if (jadwalOrder === 0) {
     return 'pagi';
   }
-  
+
   // Untuk jadwal ke-2+, check jam: < 12 = pagi, >= 12 = sore
   const jam = String(jadwal.jam || '09:00');
   const hour = Number(jam.split(':')[0] || 9);
-  
+
   return hour < 12 ? 'pagi' : 'sore';
 }
 
@@ -163,7 +163,9 @@ function resolveInfraPath(kandangId, kandangData) {
 async function acquireRunLock(todayKey, lockKey) {
   const lockRef = admin.database().ref(`scheduler_runs/${todayKey}/${lockKey}`);
   const tx = await lockRef.transaction((current) => {
-    if (current) return current;
+    // PENTING: return undefined (bukan `current`) untuk ABORT transaksi jika sudah ada
+    // Jika return current → Firebase tetap commit → tx.committed = true → lock tidak bekerja!
+    if (current) return; // undefined = abort transaction = tidak committed
     return {
       executedAt: new Date().toISOString(),
       source: 'railway-scheduler',
@@ -381,7 +383,7 @@ async function migrateLegacyRiwayatData(kandangMap) {
       cleanupUpdates[legacyKey] = null;
       continue;
     }
- 
+
     const inferredKandangId = await inferTargetForGlobalRecord(record, kandangMap);
     if (inferredKandangId) {
       await recordsRef.push().set({
@@ -523,10 +525,12 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
   }
 
   for (const kandangId of targetKandangIds) {
-    const lockKey = `${jenisPanen}_${kandangId}`;
+    // Lock key pakai jadwalId agar setiap jadwal punya slot sendiri (bukan shared per jenisPanen)
+    // Contoh: 'penjadwalan3_kandang1', 'penjadwalan4_kandang1' → tidak saling blokir
+    const lockKey = `${jadwalId}_${kandangId}`;
     const gotLock = await acquireRunLock(todayKey, lockKey);
     if (!gotLock) {
-      console.log(`[skip] ${jadwalId}/${kandangId}: slot ${jenisPanen} sudah dieksekusi hari ini`);
+      console.log(`[skip] ${jadwalId}/${kandangId}: sudah dieksekusi hari ini`);
       continue;
     }
 
@@ -559,11 +563,29 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
       continue;
     }
 
-    const pagiSnapRef = admin.database().ref(`panen_snapshot/${todayKey}/pagi/${kandangId}`);
-    const pagiSnap = await pagiSnapRef.get();
-    const nilaiPagi = pagiSnap.exists() ? Number(pagiSnap.val() || 0) : 0;
-    const delta = Math.max(sensorValue - nilaiPagi, 0);
+    // Untuk jadwal SORE: gunakan snapshot sore sebelumnya jika ada (multi-sore schedule)
+    // Jadwal sore ke-1: pakai snapshot PAGI sebagai baseline
+    // Jadwal sore ke-2+: pakai snapshot SORE sebelumnya sebagai baseline (bukan pagi)
+    const soreSnapRef = admin.database().ref(`panen_snapshot/${todayKey}/sore/${kandangId}`);
+    const soreSnap = await soreSnapRef.get();
 
+    let nilaiSebelumnya;
+    let catatanBaseline;
+    if (soreSnap.exists()) {
+      // Ada snapshot sore sebelumnya → ini sore ke-2 atau lebih
+      nilaiSebelumnya = Number(soreSnap.val() || 0);
+      catatanBaseline = `sore_sebelumnya=${nilaiSebelumnya}`;
+    } else {
+      // Belum ada snapshot sore → ini sore ke-1, pakai pagi sebagai baseline
+      const pagiSnapRef = admin.database().ref(`panen_snapshot/${todayKey}/pagi/${kandangId}`);
+      const pagiSnap = await pagiSnapRef.get();
+      nilaiSebelumnya = pagiSnap.exists() ? Number(pagiSnap.val() || 0) : 0;
+      catatanBaseline = `pagi=${nilaiSebelumnya}`;
+    }
+
+    const delta = Math.max(sensorValue - nilaiSebelumnya, 0);
+
+    // Update snapshot sore dengan nilai terbaru (untuk jadwal sore berikutnya jika ada)
     await admin.database().ref(`panen_snapshot/${todayKey}/sore`).update({
       [kandangId]: sensorValue,
       [`delta_${kandangId}`]: delta,
@@ -577,12 +599,12 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
       jam,
       jenisPanen: 'sore',
       sensorSnapshot: sensorValue,
-      panenSebelumnya: nilaiPagi,
-      catatan: `Auto-capture SORE dari Railway scheduler (delta: ${sensorValue} - ${nilaiPagi})`,
+      panenSebelumnya: nilaiSebelumnya,
+      catatan: `Auto-capture SORE dari Railway scheduler (delta: ${sensorValue} - ${nilaiSebelumnya}, baseline: ${catatanBaseline})`,
       dateKey: todayKey,
     });
 
-    console.log(`[ok] Sore ${kandangNama}: ${delta} telur (${sensorValue}-${nilaiPagi})`);
+    console.log(`[ok] Sore ${kandangNama}: ${delta} telur (${sensorValue}-${nilaiSebelumnya}, baseline: ${catatanBaseline})`);
   }
 
   // Catatan: reset snapshot TIDAK dilakukan di sini.
