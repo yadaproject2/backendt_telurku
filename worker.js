@@ -138,11 +138,8 @@ function resolveTargetKandangIds(jadwal, kandangMap) {
 function detectJenisPanen(jadwal) {
   const jam = String(jadwal.jam || '09:00');
   const hour = Number(jam.split(':')[0] || 9);
-  const ket = String(jadwal.keterangan || '').toLowerCase();
 
-  if (ket.includes('sore')) return 'sore';
-  if (ket.includes('pagi')) return 'pagi';
-  return hour >= 12 ? 'sore' : 'pagi';
+  return hour < 12 ? 'pagi' : 'sore';
 }
 
 function resolveInfraPath(kandangId, kandangData) {
@@ -519,10 +516,10 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
   }
 
   for (const kandangId of targetKandangIds) {
-    const lockKey = `${jadwalId}_${jenisPanen}_${kandangId}`;
+    const lockKey = `${jenisPanen}_${kandangId}`;
     const gotLock = await acquireRunLock(todayKey, lockKey);
     if (!gotLock) {
-      console.log(`[skip] ${jadwalId}/${kandangId}: sudah dieksekusi hari ini (${jenisPanen})`);
+      console.log(`[skip] ${jadwalId}/${kandangId}: slot ${jenisPanen} sudah dieksekusi hari ini`);
       continue;
     }
 
