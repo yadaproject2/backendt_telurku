@@ -214,9 +214,13 @@ async function resetSensorAfterLastHarvest(todayKey) {
     last_reset_by_scheduler: new Date().toISOString(),
   });
 
+  // Hapus temporary snapshot data
   await admin.database().ref(`panen_snapshot/${todayKey}`).remove();
 
-  console.log('[ok] Sensor infra1/infra2 dan snapshot panen berhasil di-reset');
+  // PERUBAHAN UNTUK PENGUJIAN: Hapus lock run hari ini agar pengujian berikutnya bisa langsung dicoba ulang
+  await admin.database().ref(`scheduler_runs/${todayKey}`).remove();
+
+  console.log('[ok] Sensor, snapshot panen, dan lock hari ini berhasil di-reset untuk pengujian baru');
 }
 
 async function writeRiwayat({
@@ -563,7 +567,8 @@ async function runForSchedule(jadwalId, jadwal, dataSensor, kandangMap, todayKey
   }
 
   for (const kandangId of targetKandangIds) {
-    const lockKey = `${jadwalId}_${kandangId}`;
+    // PERUBAHAN UNTUK PENGUJIAN: Menambahkan string jam eksekusi ke lockKey supaya tidak bentrok saat dicoba ulang di jam berbeda
+    const lockKey = `${jadwalId}_${kandangId}_${jam.replace(':', '')}`;
     const gotLock = await acquireRunLock(todayKey, lockKey);
 
     if (!gotLock) {
@@ -774,11 +779,11 @@ async function bootstrap() {
     async () => {
       try {
         await runTick();
-        
-        // OPTIMASI: Jalankan maintenance berkala (misal jam 23:59 malam) bukan di bootstrap utama
+
+        // Optimasi Pembersihan data berkala otomatis setiap jam 23:59 malam
         const skr = getJakartaNow();
         if (skr.getHours() === 23 && skr.getMinutes() === 59 && COMPACT_MODE) {
-           await runCompactMaintenance().catch(err => console.error('Cron maintenance error:', err.message));
+          await runCompactMaintenance().catch(err => console.error('Cron maintenance error:', err.message));
         }
       } catch (e) {
         console.error('[error] Tick failed:', e.message);
@@ -794,4 +799,3 @@ bootstrap().catch((e) => {
   console.error('[fatal] bootstrap failed:', e.message);
   process.exit(1);
 });
-
